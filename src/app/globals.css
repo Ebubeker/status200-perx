@@ -1,26 +1,53 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@theme {
+  /* Warm, editorial palette — intentionally NOT the default white/blue-gradient AI look */
+  --color-paper: #f4f1ea;
+  --color-paper-2: #efe9dd;
+  --color-ink: #1a1916;
+  --color-ink-soft: #4a463d;
+  --color-muted: #8c867a;
+  --color-line: #e4ded1;
+  --color-card: #fcfbf6;
+  --color-primary: #15604a;
+  --color-primary-ink: #0c3a2c;
+  --color-primary-soft: #e2ede8;
+  --color-accent: #c2643f;
+  --color-accent-soft: #f3e3d9;
+  --color-gold: #a8812f;
+
+  --font-display: var(--font-fraunces);
+  --font-sans: var(--font-hanken);
+
+  --radius-card: 18px;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+:root { color-scheme: light; }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+* { -webkit-tap-highlight-color: transparent; }
+
+html, body { background-color: var(--color-paper); }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, .font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.018em;
+  font-weight: 500;
+}
+
+::selection { background: var(--color-primary); color: #fff; }
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* subtle paper grain via layered dotted texture — no gradients */
+.grain {
+  background-image: radial-gradient(rgba(26,25,22,0.035) 0.5px, transparent 0.5px);
+  background-size: 7px 7px;
 }

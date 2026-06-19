@@ -1,0 +1,202 @@
+// Perx — multi-tenant employee benefits marketplace
+// Companies (employers) fund perks; employees compose AI-built packs from
+// many providers; HR approves; providers redeem vouchers. Albania-first.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  HR
+  FINANCE
+  EMPLOYEE
+}
+
+enum OfferCategory {
+  wellness
+  fitness
+  food
+  health
+  travel
+  learning
+  culture
+  telecom
+}
+
+enum PackageStatus {
+  DRAFT
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum VoucherStatus {
+  READY
+  REDEEMED
+}
+
+enum SubscriptionStatus {
+  NONE
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+}
+
+// A tenant. Maps to a Clerk Organization when one exists.
+model Company {
+  id                  String             @id @default(cuid())
+  clerkOrgId          String?            @unique
+  name                String
+  slug                String             @unique
+  perksBudgetLek      Int                @default(12000)
+  subscriptionStatus  SubscriptionStatus @default(NONE)
+  lemonOrderId        String?
+  lemonSubscriptionId String?
+  lemonVariantId      String?
+  createdAt           DateTime           @default(now())
+
+  memberships Membership[]
+  packages    PerkPackage[]
+  vouchers    Voucher[]
+}
+
+// A Clerk user's seat inside a company, with a role and personal balances.
+model Membership {
+  id               String   @id @default(cuid())
+  clerkUserId      String
+  companyId        String
+  role             Role     @default(EMPLOYEE)
+  displayName      String
+  department       String   @default("Team")
+  perksBudgetLek   Int      @default(12000)
+  recognitionCoins Int      @default(3200)
+  createdAt        DateTime @default(now())
+
+  company         Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  pulses          Pulse[]
+  recommendations Recommendation[]
+  packages        PerkPackage[]
+  vouchers        Voucher[]
+
+  @@unique([clerkUserId, companyId])
+  @@index([companyId])
+}
+
+// Benefit providers serve many companies (cross-tenant by nature).
+model Provider {
+  id        String   @id
+  name      String
+  slug      String   @unique
+  area      String   @default("Tiranë")
+  createdAt DateTime @default(now())
+
+  offers   Offer[]
+  vouchers Voucher[]
+}
+
+model Offer {
+  id         String        @id
+  providerId String
+  title      String
+  category   OfferCategory
+  priceLek   Int
+  area       String
+  taxFree    Boolean       @default(false)
+  active     Boolean       @default(true)
+
+  provider Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  vouchers Voucher[]
+
+  @@index([providerId])
+}
+
+// A weekly tap-only check-in.
+model Pulse {
+  id           String   @id @default(cuid())
+  membershipId String
+  answers      Json
+  createdAt    DateTime @default(now())
+
+  membership      Membership       @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  recommendations Recommendation[]
+
+  @@index([membershipId])
+}
+
+// AI-generated package suggestion produced from a pulse.
+model Recommendation {
+  id           String   @id @default(cuid())
+  pulseId      String
+  membershipId String
+  label        String
+  rationale    String
+  itemOfferIds String[]
+  totalLek     Int
+  createdAt    DateTime @default(now())
+
+  pulse      Pulse      @relation(fields: [pulseId], references: [id], onDelete: Cascade)
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@index([membershipId])
+}
+
+// A chosen pack moving through draft -> pending -> approved.
+model PerkPackage {
+  id                   String        @id @default(cuid())
+  companyId            String
+  membershipId         String
+  label                String
+  rationale            String
+  itemOfferIds         String[]
+  totalLek             Int
+  status               PackageStatus @default(DRAFT)
+  decidedByClerkUserId String?
+  createdAt            DateTime      @default(now())
+  decidedAt            DateTime?
+
+  company    Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  membership Membership  @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  vouchers   Voucher[]
+
+  @@index([companyId])
+  @@index([membershipId])
+}
+
+// Issued on approval; redeemed by the provider.
+model Voucher {
+  id           String        @id @default(cuid())
+  companyId    String
+  membershipId String
+  packageId    String
+  offerId      String
+  providerId   String
+  code         String        @unique
+  status       VoucherStatus @default(READY)
+  createdAt    DateTime      @default(now())
+  redeemedAt   DateTime?
+
+  company    Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  membership Membership  @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  package    PerkPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  offer      Offer       @relation(fields: [offerId], references: [id])
+  provider   Provider    @relation(fields: [providerId], references: [id])
+
+  @@index([companyId])
+  @@index([providerId])
+  @@index([membershipId])
+}
+
+// Idempotency + audit log for Lemon Squeezy webhooks.
+model LemonWebhookEvent {
+  id          String   @id
+  eventName   String
+  payload     Json
+  processedAt DateTime @default(now())
+}
