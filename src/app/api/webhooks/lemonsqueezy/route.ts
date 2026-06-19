@@ -49,38 +49,45 @@ export async function POST(req: NextRequest) {
   const companyId = body.meta?.custom_data?.company_id;
   const resourceId = body.data?.id != null ? String(body.data.id) : undefined;
 
-  // Idempotency — the signature is unique per delivery; retries reuse it.
-  try {
-    await prisma.lemonWebhookEvent.create({
-      data: { id: signature as string, eventName, payload: body as unknown as Prisma.InputJsonValue },
-    });
-  } catch {
-    return new Response("Already processed", { status: 200 });
-  }
-
+  let companyData: Prisma.CompanyUpdateInput | null = null;
   if (companyId) {
     if (ACTIVATING.has(eventName)) {
-      await prisma.company
-        .update({
-          where: { id: companyId },
-          data: {
-            subscriptionStatus: SubscriptionStatus.ACTIVE,
-            lemonVariantId: process.env.LEMONSQUEEZY_VARIANT_ID,
-            ...(eventName.startsWith("subscription")
-              ? { lemonSubscriptionId: resourceId }
-              : { lemonOrderId: resourceId }),
-          },
-        })
-        .catch(() => {});
+      companyData = {
+        subscriptionStatus: SubscriptionStatus.ACTIVE,
+        lemonVariantId: process.env.LEMONSQUEEZY_VARIANT_ID,
+        ...(eventName.startsWith("subscription")
+          ? { lemonSubscriptionId: resourceId }
+          : { lemonOrderId: resourceId }),
+      };
     } else if (CANCELLING.has(eventName)) {
-      await prisma.company
-        .update({ where: { id: companyId }, data: { subscriptionStatus: SubscriptionStatus.CANCELLED } })
-        .catch(() => {});
+      companyData = { subscriptionStatus: SubscriptionStatus.CANCELLED };
     } else if (PAST_DUE.has(eventName)) {
-      await prisma.company
-        .update({ where: { id: companyId }, data: { subscriptionStatus: SubscriptionStatus.PAST_DUE } })
-        .catch(() => {});
+      companyData = { subscriptionStatus: SubscriptionStatus.PAST_DUE };
     }
+  }
+
+  // Record the delivery (idempotency) AND apply the effect in one transaction.
+  // A transient failure rolls back the idempotency row so Lemon's retry reprocesses.
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.lemonWebhookEvent.create({
+        data: { id: signature as string, eventName, payload: body as unknown as Prisma.InputJsonValue },
+      });
+      if (companyId && companyData) {
+        try {
+          await tx.company.update({ where: { id: companyId }, data: companyData });
+        } catch (e) {
+          // Unknown/removed company — nothing to do; ack so Lemon stops retrying.
+          if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2025") throw e;
+        }
+      }
+    });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      return new Response("Already processed", { status: 200 }); // duplicate delivery
+    }
+    console.error("[lemon webhook] processing failed:", e);
+    return new Response("Processing error", { status: 500 }); // transient — Lemon will retry
   }
 
   return new Response("ok", { status: 200 });

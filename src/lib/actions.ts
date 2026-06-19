@@ -1,5 +1,6 @@
 "use server";
 
+import crypto from "node:crypto";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { prisma } from "./prisma";
@@ -14,10 +15,16 @@ export async function startSubscriptionCheckout(): Promise<void> {
   redirect(url);
 }
 
+// Thrown inside the approval transaction to force a clean rollback on an
+// expected condition (race lost or insufficient funds) without a 500.
+class ApprovalAbort extends Error {}
+
 function voucherCode(): string {
+  // Collision-resistant: 8 chars from a 31-symbol alphabet via CSPRNG (~10^11 space).
   const s = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.randomBytes(8);
   let c = "";
-  for (let i = 0; i < 6; i++) c += s[Math.floor(Math.random() * s.length)];
+  for (let i = 0; i < 8; i++) c += s[bytes[i] % s.length];
   return `PX-${c}`;
 }
 
@@ -87,36 +94,44 @@ export async function approvePackage(id: string): Promise<void> {
   });
   if (!pkg) return;
 
-  await prisma.$transaction(async (tx) => {
-    const updated = await tx.perkPackage.updateMany({
-      where: { id: pkg.id, status: "PENDING" },
-      data: { status: "APPROVED", decidedByClerkUserId: member.clerkUserId, decidedAt: new Date() },
-    });
-    if (updated.count === 0) return; // another approver won the race
-
-    const funded = await tx.membership.findUnique({ where: { id: pkg.membershipId } });
-    const newBudget = Math.max(0, (funded?.perksBudgetLek ?? 0) - pkg.totalLek);
-    await tx.membership.update({
-      where: { id: pkg.membershipId },
-      data: { perksBudgetLek: newBudget },
-    });
-
-    for (const offerId of pkg.itemOfferIds) {
-      const offer = offerById(offerId);
-      if (!offer) continue;
-      await tx.voucher.create({
-        data: {
-          companyId: pkg.companyId,
-          membershipId: pkg.membershipId,
-          packageId: pkg.id,
-          offerId: offer.id,
-          providerId: offer.providerId,
-          code: voucherCode(),
-          status: "READY",
-        },
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Claim the package atomically — only one approver can flip PENDING -> APPROVED.
+      const claimed = await tx.perkPackage.updateMany({
+        where: { id: pkg.id, status: "PENDING" },
+        data: { status: "APPROVED", decidedByClerkUserId: member.clerkUserId, decidedAt: new Date() },
       });
-    }
-  });
+      if (claimed.count === 0) throw new ApprovalAbort("already-decided");
+
+      // Debit the budget atomically, ONLY if sufficient funds remain. This single
+      // conditional decrement closes the lost-update race AND enforces no-overspend.
+      const debited = await tx.membership.updateMany({
+        where: { id: pkg.membershipId, perksBudgetLek: { gte: pkg.totalLek } },
+        data: { perksBudgetLek: { decrement: pkg.totalLek } },
+      });
+      if (debited.count === 0) throw new ApprovalAbort("insufficient-budget");
+
+      for (const offerId of pkg.itemOfferIds) {
+        const offer = offerById(offerId);
+        if (!offer) continue;
+        await tx.voucher.create({
+          data: {
+            companyId: pkg.companyId,
+            membershipId: pkg.membershipId,
+            packageId: pkg.id,
+            offerId: offer.id,
+            providerId: offer.providerId,
+            code: voucherCode(),
+            status: "READY",
+          },
+        });
+      }
+    });
+  } catch (e) {
+    // Expected aborts (race lost / insufficient funds) roll the whole transaction
+    // back — package stays PENDING, nothing is debited or issued. Re-throw anything else.
+    if (!(e instanceof ApprovalAbort)) throw e;
+  }
 
   revalidatePath("/employer");
   revalidatePath("/provider");
